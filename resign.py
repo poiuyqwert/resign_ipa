@@ -1,4 +1,4 @@
-import zipfile, os, tempfile, shutil, subprocess, plistlib, stat
+import zipfile, os, tempfile, shutil, subprocess, plistlib, stat, sys
 
 # Full path to ipa: "/path/to/app.ipa"
 ipa_source = ""
@@ -6,6 +6,8 @@ ipa_source = ""
 profile_source = ""
 # Signing identity name for profile: "iPhone Developer: Developer Identity"
 identity_name = ""
+# TeamID used to update the entitlements
+team_id = ""
 # If needed, set to a string containing the bundle identifier to match your profile: "com.company.app"
 bundle_identifier = None
 # If you would like to rename the app, change this to a string
@@ -49,20 +51,20 @@ try:
 	log('profile', profile)
 	shutil.copy2(profile_source, profile)
 
-	if bundle_identifier or bundle_name:
-		# Convert plist to xml (can't edit binary)
-		binaryplist = os.path.join(app, 'Info.plist')
-		log('binaryplist', binaryplist)
-		p = list(os.path.splitext(binaryplist))
-		p[0] = p[0] + '.xml'
-		xmlplist = ''.join(p)
-		log('xmlplist', xmlplist)
-		execute = 'plutil -convert xml1 -o "%s" "%s"' % (xmlplist, binaryplist)
-		log('plutil', execute)
-		subprocess.call(execute, shell=True)
+	# Convert plist to xml (can't edit binary)
+	binaryplist = os.path.join(app, 'Info.plist')
+	log('binaryplist', binaryplist)
+	p = list(os.path.splitext(binaryplist))
+	p[0] = p[0] + '.xml'
+	xmlplist = ''.join(p)
+	log('xmlplist', xmlplist)
+	execute = 'plutil -convert xml1 -o "%s" "%s"' % (xmlplist, binaryplist)
+	log('plutil', execute)
+	subprocess.call(execute, shell=True)
 
+	plist = plistlib.readPlist(xmlplist)
+	if bundle_identifier or bundle_name:
 		# Change bundle identifier and display name
-		plist = plistlib.readPlist(xmlplist)
 		if isinstance(bundle_identifier, str) or isinstance(bundle_identifier, unicode):
 			plist['CFBundleIdentifier'] = bundle_identifier
 		if isinstance(bundle_name, str) or isinstance(bundle_name, unicode):
@@ -73,7 +75,9 @@ try:
 		execute = 'plutil -convert binary1 -o "%s" "%s"' % (binaryplist, xmlplist)
 		log('plutil', execute)
 		subprocess.call(execute, shell=True)
-		os.remove(xmlplist)
+	os.remove(xmlplist)
+	bundle_identifier = plist['CFBundleIdentifier']
+	bundle_name = plist['CFBundleDisplayName']
 
 	# Fix exec permission on executable (is this needed?)
 	p = os.path.splitext(os.path.basename(app))
@@ -83,10 +87,26 @@ try:
 	log('permissions', permissions)
 	os.chmod(executable, permissions)
 
+	# Create entitlements.plist
+	entitlementsplist = {
+		'application-identifier':'%s.%s' % (team_id, bundle_identifier),
+		'get-task-allow':False
+	}
+	entitlementspath = os.path.join(temp_dir, 'entitlements.plist')
+	plistlib.writePlist(entitlementsplist, entitlementspath)
+	log('entitlementspath', entitlementspath)
+
 	# Resign using 
-	execute = 'codesign -f -s "%s" --resource-rules "%s/ResourceRules.plist" "%s"' % (identity_name, app, app)
+	execute = 'codesign -f -s "%s" --entitlements "%s" --resource-rules "%s/ResourceRules.plist" "%s"' % (identity_name, entitlementspath, app, app)
 	log('codesign', execute)
-	subprocess.call(execute, shell=True)
+	process = subprocess.Popen(execute, shell=True, stderr=subprocess.PIPE)
+	while True:
+		out = process.stderr.read(1)
+		if out == '' and process.poll() != None:
+			break
+		if out != '':
+			sys.stdout.write(out)
+			sys.stdout.flush()
 
 	# Create new resigned .ipa file
 	p = list(os.path.splitext(ipa_source))
